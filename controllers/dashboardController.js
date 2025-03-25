@@ -1,6 +1,5 @@
 const Event = require('../models/Event');
 const User = require('../models/User');
-const Notification = require('../models/Notification');
 
 const getDashboardData = async (req, res) => {
   try {

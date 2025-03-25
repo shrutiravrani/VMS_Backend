@@ -1,5 +1,4 @@
 const Event = require('../models/Event');
-const { addNotification } = require('./notificationController');
 const Chat = require('../models/Chat'); 
 const mongoose = require('mongoose');
 const User = require('../models/User');
