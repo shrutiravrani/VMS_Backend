@@ -1,68 +1,49 @@
-const Chat = require("../models/Chat");
-const Event = require("../models/Event");
-const User = require("../models/User");
-const { getIo } = require("../models/socket");
 const Message = require('../models/Message');
+const Event = require('../models/Event');
+const User = require('../models/User');
+const { getIo } = require("../models/socket");
 
-// Get user's chats (events where messages were exchanged)
+// Get user's message history with event managers
 const getUserChats = async (req, res) => {
   try {
     const userId = req.user._id;
 
-    // Find all events where the user is either a team member or event manager
-    const events = await Event.find({
+    // Get all messages where the user is either sender or recipient
+    const messages = await Message.find({
       $or: [
-        { "team.members": userId },
-        { createdBy: userId }
+        { sender: userId },
+        { recipients: userId }
       ]
-    }).select('title');
+    })
+    .populate('sender', 'name')
+    .sort({ createdAt: -1 })
+    .lean();
 
-    // Format the response
-    const chats = events.map(event => ({
-      eventId: event._id,
-      title: event.title
-    }));
+    // Group messages by event manager
+    const messagesByManager = messages.reduce((acc, msg) => {
+      const otherParty = msg.sender._id.toString() === userId.toString() 
+        ? msg.recipients[0] 
+        : msg.sender._id;
+      
+      if (!acc[otherParty]) {
+        acc[otherParty] = {
+          lastMessage: msg.text,
+          lastMessageTime: msg.createdAt
+        };
+      }
+      return acc;
+    }, {});
 
-    res.json(chats);
+    res.json(messagesByManager);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch chats", error: error.message });
-  }
-};
-
-// Get messages for a specific event
-const getChatMessages = async (req, res) => {
-  try {
-    const { eventId } = req.params;
-    const userId = req.user._id;
-
-    // Find the event
-    const event = await Event.findById(eventId);
-    if (!event) {
-      return res.status(404).json({ message: "Event not found" });
-    }
-
-    // Check if user is part of the event
-    const isTeamMember = event.team.members.includes(userId);
-    const isEventManager = event.createdBy.toString() === userId.toString();
-    if (!isTeamMember && !isEventManager) {
-      return res.status(403).json({ message: "Not authorized to view these messages" });
-    }
-
-    // Get messages for this event
-    const chat = await Chat.findOne({ eventId })
-      .populate('messages.sender', 'name')
-      .select('messages');
-
-    res.json(chat ? chat.messages : []);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch messages", error: error.message });
+    res.status(500).json({ message: "Failed to fetch message history", error: error.message });
   }
 };
 
 // Send message to selected volunteers
 const sendMessage = async (req, res) => {
   try {
-    const { message, recipients } = req.body;
+    const { message, recipients, eventId } = req.body;
     const senderId = req.user._id;
 
     if (!message.trim()) {
@@ -71,6 +52,28 @@ const sendMessage = async (req, res) => {
 
     if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
       return res.status(400).json({ message: "Please select at least one recipient" });
+    }
+
+    // If this is an event-based message, verify permissions
+    if (eventId) {
+      const event = await Event.findById(eventId);
+      if (!event) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+
+      // Check if sender is the event manager
+      if (event.createdBy.toString() !== senderId.toString()) {
+        return res.status(403).json({ message: "Only event managers can send event messages" });
+      }
+
+      // Verify all recipients are accepted volunteers for this event
+      const validRecipients = event.applicants.filter(
+        app => app.status === 'accepted' && recipients.includes(app.user.toString())
+      );
+
+      if (validRecipients.length !== recipients.length) {
+        return res.status(400).json({ message: "Some recipients are not accepted volunteers for this event" });
+      }
     }
 
     // Create new message
@@ -90,49 +93,18 @@ const sendMessage = async (req, res) => {
 
     // Emit to specific recipients using Socket.IO
     const io = getIo();
-    recipients.forEach(recipientId => {
-      io.to(recipientId.toString()).emit("receiveMessage", populatedMessage);
-    });
+    if (io) {
+      recipients.forEach(recipientId => {
+        io.to(recipientId.toString()).emit("receiveMessage", populatedMessage);
+      });
+    } else {
+      console.warn("Socket.IO instance not available");
+    }
 
     res.status(201).json(populatedMessage);
   } catch (error) {
     console.error("Error in sendMessage:", error);
     res.status(500).json({ message: "Failed to send message", error: error.message });
-  }
-};
-
-// Get list of event managers who have sent messages to the volunteer
-const getSenders = async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const user = await User.findById(userId);
-
-    // Get all messages sent to this volunteer
-    const messages = await Message.find({
-      recipients: userId
-    })
-    .populate('sender', 'name')
-    .sort({ createdAt: -1 })
-    .lean();
-
-    // Extract unique senders with additional info
-    const senders = [...new Map(
-      messages.map(msg => [
-        msg.sender._id.toString(),
-        {
-          _id: msg.sender._id,
-          name: msg.sender.name,
-          lastMessage: msg.text,
-          lastMessageTime: msg.createdAt,
-          unreadCount: user.unreadMessages.get(msg.sender._id.toString()) || 0
-        }
-      ])
-    ).values()];
-
-    res.json(senders);
-  } catch (error) {
-    console.error('Error getting senders:', error);
-    res.status(500).json({ message: 'Failed to get senders' });
   }
 };
 
@@ -221,9 +193,7 @@ const replyToMessage = async (req, res) => {
 
 module.exports = {
   getUserChats,
-  getChatMessages,
   sendMessage,
-  getSenders,
   getMessages,
   replyToMessage
 };

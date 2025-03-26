@@ -25,19 +25,6 @@ const createEvent = async (req, res) => {
 
     await newEvent.save();
 
-    // ✅ Check if chat group already exists
-    let chatGroup = await Chat.findOne({ eventId: newEvent._id });
-
-    if (!chatGroup) {
-      chatGroup = new Chat({
-        eventId: newEvent._id,
-        members: [req.user._id], // ✅ Only the event manager initially
-        messages: [{ sender: req.user._id, text: `Welcome to the "${title}" chat!` }],
-      });
-
-      await chatGroup.save();
-    }
-
     res.status(201).json({ message: 'Event created successfully', event: newEvent });
   } catch (error) {
     res.status(500).json({ error: 'Something went wrong', details: error.message });
@@ -277,65 +264,46 @@ const getMyApplications = async (req, res) => {
 // Update application status
 const updateApplicationStatus = async (req, res) => {
   try {
-    if (req.user.role !== 'event_manager') {
-      return res.status(403).json({ message: 'Only event managers can update application status' });
+    const { eventId, userId, status } = req.body;
+
+    if (!['accepted', 'rejected'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
     }
 
-    const { id, applicationId } = req.params;
-    const { status } = req.body;
-
-    // Validate event ID format
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      console.log('Invalid event ID format:', id);
-      return res.status(400).json({ error: 'Invalid event ID format' });
-    }
-
-    const event = await Event.findById(id);
+    const event = await Event.findById(eventId);
     if (!event) {
-      return res.status(404).json({ error: 'Event not found' });
+      return res.status(404).json({ message: 'Event not found' });
     }
 
-    // Find the application in the applicants array
-    const applicationIndex = event.applicants.findIndex(app => app._id.toString() === applicationId);
-    if (applicationIndex === -1) {
-      return res.status(404).json({ error: 'Application not found' });
+    // Check if user is the event manager
+    if (event.createdBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update application status' });
     }
 
-    // Update the application status
-    event.applicants[applicationIndex].status = status;
-    
-    // If accepting the application, add to team members
-    if (status.toLowerCase() === 'accepted') {
-      const userId = event.applicants[applicationIndex].user;
-      if (!event.team.members.includes(userId)) {
-        event.team.members.push(userId);
-      }
+    // Find and update the application
+    const application = event.applicants.find(
+      app => app.user.toString() === userId
+    );
 
-      // Handle chat group
-      let chatGroup = await Chat.findOne({ eventId: event._id });
-      if (!chatGroup) {
-        chatGroup = new Chat({
-          eventId: event._id,
-          members: [event.createdBy, ...event.team.members],
-          messages: [{ sender: event.createdBy, text: `Welcome to "${event.title}" chat!` }],
-        });
-      } else {
-        if (!chatGroup.members.includes(userId)) {
-          chatGroup.members.push(userId);
-        }
-      }
-      await chatGroup.save();
+    if (!application) {
+      return res.status(404).json({ message: 'Application not found' });
     }
 
+    // Update the status
+    application.status = status;
     await event.save();
-    console.log(`Successfully updated application ${applicationId} status to ${status}`);
-    res.status(200).json({ 
-      message: `Application ${status} successfully updated`,
-      status: status
-    });
+
+    // Create notification for volunteer
+    const message = status === 'accepted'
+      ? `Your application for "${event.title}" has been accepted!`
+      : `Your application for "${event.title}" has been rejected.`;
+    
+    await addNotification(userId, message);
+
+    res.json({ message: 'Application status updated successfully' });
   } catch (error) {
-    console.error('Error in updateApplicationStatus:', error);
-    res.status(500).json({ error: 'Failed to update application status', details: error.message });
+    console.error('Error updating application status:', error);
+    res.status(500).json({ message: 'Failed to update application status' });
   }
 };
 
@@ -476,19 +444,17 @@ const getEventVolunteers = async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to view volunteers for this event' });
     }
 
-    // Filter only accepted applicants
+    // Filter only accepted applicants and format them for messaging
     const volunteers = event.applicants
       .filter(app => app.status === 'accepted')
       .map(app => ({
         _id: app.user._id,
         name: app.user.name,
-        email: app.user.email,
-        completed: app.completed || false,
-        rating: app.rating
+        email: app.user.email
       }));
 
-    console.log('Sending volunteers:', volunteers); // Add logging
-    res.json({ volunteers }); // Always send as an object with volunteers array
+    console.log('Sending volunteers:', volunteers);
+    res.json(volunteers); // Send array directly for messaging compatibility
   } catch (error) {
     console.error('Error in getEventVolunteers:', error);
     res.status(500).json({ message: 'Server error', error: error.message });

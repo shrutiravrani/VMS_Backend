@@ -35,18 +35,28 @@ const messageSchema = new mongoose.Schema({
 
 // Pre-save middleware to handle message creation
 messageSchema.pre('save', async function(next) {
-  if (this.isNew) {
-    const User = mongoose.model('User');
-    
-    // Update unread message count for all recipients
-    for (const recipientId of this.recipients) {
-      const recipient = await User.findById(recipientId);
-      if (recipient) {
-        await recipient.updateMessageCount(this.sender, true);
+  try {
+    if (this.isNew) {
+      const User = mongoose.model('User');
+      
+      // Update unread message count for all recipients
+      for (const recipientId of this.recipients) {
+        try {
+          const recipient = await User.findById(recipientId);
+          if (recipient) {
+            await recipient.updateMessageCount(this.sender, true);
+          }
+        } catch (err) {
+          console.error(`Failed to update message count for recipient ${recipientId}:`, err);
+          // Continue with other recipients even if one fails
+        }
       }
     }
+    next();
+  } catch (err) {
+    console.error('Error in message pre-save middleware:', err);
+    next(); // Continue saving the message even if updating counts fails
   }
-  next();
 });
 
 // Method to mark message as read
